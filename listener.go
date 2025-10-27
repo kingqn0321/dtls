@@ -6,12 +6,13 @@ package dtls
 import (
 	"net"
 
-	"github.com/pion/dtls/v2/pkg/protocol"
-	"github.com/pion/dtls/v2/pkg/protocol/recordlayer"
-	"github.com/pion/transport/v2/udp"
+	"github.com/pion/dtls/v3/internal/net/udp"
+	dtlsnet "github.com/pion/dtls/v3/pkg/net"
+	"github.com/pion/dtls/v3/pkg/protocol"
+	"github.com/pion/dtls/v3/pkg/protocol/recordlayer"
 )
 
-// Listen creates a DTLS listener
+// Listen creates a DTLS listener.
 func Listen(network string, laddr *net.UDPAddr, config *Config) (net.Listener, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
@@ -27,13 +28,21 @@ func Listen(network string, laddr *net.UDPAddr, config *Config) (net.Listener, e
 			if err := h.Unmarshal(pkts[0]); err != nil {
 				return false
 			}
+
 			return h.ContentType == protocol.ContentTypeHandshake
 		},
+	}
+	// If connection ID support is enabled, then they must be supported in
+	// routing.
+	if config.ConnectionIDGenerator != nil {
+		lc.DatagramRouter = cidDatagramRouter(len(config.ConnectionIDGenerator()))
+		lc.ConnectionIdentifier = cidConnIdentifier()
 	}
 	parent, err := lc.Listen(network, laddr)
 	if err != nil {
 		return nil, err
 	}
+
 	return &listener{
 		config: config,
 		parent: parent,
@@ -41,7 +50,7 @@ func Listen(network string, laddr *net.UDPAddr, config *Config) (net.Listener, e
 }
 
 // NewListener creates a DTLS listener which accepts connections from an inner Listener.
-func NewListener(inner net.Listener, config *Config) (net.Listener, error) {
+func NewListener(inner dtlsnet.PacketListener, config *Config) (net.Listener, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
@@ -52,22 +61,21 @@ func NewListener(inner net.Listener, config *Config) (net.Listener, error) {
 	}, nil
 }
 
-// listener represents a DTLS listener
+// listener represents a DTLS listener.
 type listener struct {
 	config *Config
-	parent net.Listener
+	parent dtlsnet.PacketListener
 }
 
 // Accept waits for and returns the next connection to the listener.
 // You have to either close or read on all connection that are created.
-// Connection handshake will timeout using ConnectContextMaker in the Config.
-// If you want to specify the timeout duration, set ConnectContextMaker.
 func (l *listener) Accept() (net.Conn, error) {
-	c, err := l.parent.Accept()
+	c, raddr, err := l.parent.Accept()
 	if err != nil {
 		return nil, err
 	}
-	return Server(c, l.config)
+
+	return Server(c, raddr, l.config)
 }
 
 // Close closes the listener.

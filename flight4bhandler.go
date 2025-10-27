@@ -7,15 +7,21 @@ import (
 	"bytes"
 	"context"
 
-	"github.com/pion/dtls/v2/pkg/crypto/prf"
-	"github.com/pion/dtls/v2/pkg/protocol"
-	"github.com/pion/dtls/v2/pkg/protocol/alert"
-	"github.com/pion/dtls/v2/pkg/protocol/extension"
-	"github.com/pion/dtls/v2/pkg/protocol/handshake"
-	"github.com/pion/dtls/v2/pkg/protocol/recordlayer"
+	"github.com/pion/dtls/v3/pkg/crypto/prf"
+	"github.com/pion/dtls/v3/pkg/protocol"
+	"github.com/pion/dtls/v3/pkg/protocol/alert"
+	"github.com/pion/dtls/v3/pkg/protocol/extension"
+	"github.com/pion/dtls/v3/pkg/protocol/handshake"
+	"github.com/pion/dtls/v3/pkg/protocol/recordlayer"
 )
 
-func flight4bParse(_ context.Context, _ flightConn, state *State, cache *handshakeCache, cfg *handshakeConfig) (flightVal, *alert.Alert, error) {
+func flight4bParse(
+	_ context.Context,
+	_ flightConn,
+	state *State,
+	cache *handshakeCache,
+	cfg *handshakeConfig,
+) (flightVal, *alert.Alert, error) {
 	_, msgs, ok := cache.fullPullMap(state.handshakeRecvSequence, state.cipherSuite,
 		handshakeCachePullRule{handshake.TypeFinished, cfg.initialEpoch + 1, true, false},
 	)
@@ -47,7 +53,13 @@ func flight4bParse(_ context.Context, _ flightConn, state *State, cache *handsha
 	return flight4b, nil, nil
 }
 
-func flight4bGenerate(_ flightConn, state *State, cache *handshakeCache, cfg *handshakeConfig) ([]*packet, *alert.Alert, error) {
+//nolint:cyclop
+func flight4bGenerate(
+	_ flightConn,
+	state *State,
+	cache *handshakeCache,
+	cfg *handshakeConfig,
+) ([]*packet, *alert.Alert, error) {
 	var pkts []*packet
 
 	extensions := []extension.Extension{&extension.RenegotiationInfo{
@@ -59,9 +71,10 @@ func flight4bGenerate(_ flightConn, state *State, cache *handshakeCache, cfg *ha
 			Supported: true,
 		})
 	}
-	if state.srtpProtectionProfile != 0 {
+	if state.getSRTPProtectionProfile() != 0 {
 		extensions = append(extensions, &extension.UseSRTP{
-			ProtectionProfiles: []SRTPProtectionProfile{state.srtpProtectionProfile},
+			ProtectionProfiles:  []SRTPProtectionProfile{state.getSRTPProtectionProfile()},
+			MasterKeyIdentifier: cfg.localSRTPMasterKeyIdentifier,
 		})
 	}
 
@@ -77,18 +90,24 @@ func flight4bGenerate(_ flightConn, state *State, cache *handshakeCache, cfg *ha
 	}
 
 	cipherSuiteID := uint16(state.cipherSuite.ID())
-	serverHello := &handshake.Handshake{
-		Message: &handshake.MessageServerHello{
-			Version:           protocol.Version1_2,
-			Random:            state.localRandom,
-			SessionID:         state.SessionID,
-			CipherSuiteID:     &cipherSuiteID,
-			CompressionMethod: defaultCompressionMethods()[0],
-			Extensions:        extensions,
-		},
+	var serverHello handshake.Handshake
+
+	serverHelloMessage := &handshake.MessageServerHello{
+		Version:           protocol.Version1_2,
+		Random:            state.localRandom,
+		SessionID:         state.SessionID,
+		CipherSuiteID:     &cipherSuiteID,
+		CompressionMethod: defaultCompressionMethods()[0],
+		Extensions:        extensions,
 	}
 
-	serverHello.Header.MessageSequence = uint16(state.handshakeSendSequence)
+	if cfg.serverHelloMessageHook != nil {
+		serverHello = handshake.Handshake{Message: cfg.serverHelloMessageHook(*serverHelloMessage)}
+	} else {
+		serverHello = handshake.Handshake{Message: serverHelloMessage}
+	}
+
+	serverHello.Header.MessageSequence = uint16(state.handshakeSendSequence) //nolint:gosec // G115
 
 	if len(state.localVerifyData) == 0 {
 		plainText := cache.pullAndMerge(
@@ -112,7 +131,7 @@ func flight4bGenerate(_ flightConn, state *State, cache *handshakeCache, cfg *ha
 				Header: recordlayer.Header{
 					Version: protocol.Version1_2,
 				},
-				Content: serverHello,
+				Content: &serverHello,
 			},
 		},
 		&packet{

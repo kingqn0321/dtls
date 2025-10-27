@@ -8,15 +8,16 @@ package protocol
 // https://tools.ietf.org/html/rfc4346#section-6.2.1
 type ContentType uint8
 
-// ContentType enums
+// ContentType enums.
 const (
 	ContentTypeChangeCipherSpec ContentType = 20
 	ContentTypeAlert            ContentType = 21
 	ContentTypeHandshake        ContentType = 22
 	ContentTypeApplicationData  ContentType = 23
+	ContentTypeConnectionID     ContentType = 25
 )
 
-// Content is the top level distinguisher for a DTLS Datagram
+// Content is the top level distinguisher for a DTLS Datagram.
 type Content interface {
 	ContentType() ContentType
 	Marshal() ([]byte, error)

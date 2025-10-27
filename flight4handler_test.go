@@ -5,13 +5,18 @@ package dtls
 
 import (
 	"context"
+	"crypto/tls"
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v2/internal/ciphersuite"
-	"github.com/pion/dtls/v2/pkg/protocol/alert"
-	"github.com/pion/dtls/v2/pkg/protocol/handshake"
-	"github.com/pion/transport/v2/test"
+	"github.com/pion/dtls/v3/internal/ciphersuite"
+	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	"github.com/pion/dtls/v3/pkg/crypto/signaturehash"
+	"github.com/pion/dtls/v3/pkg/protocol/alert"
+	"github.com/pion/dtls/v3/pkg/protocol/handshake"
+	"github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/assert"
 )
 
 type flight4TestMockFlightConn struct{}
@@ -20,7 +25,7 @@ func (f *flight4TestMockFlightConn) notify(context.Context, alert.Level, alert.D
 	return nil
 }
 func (f *flight4TestMockFlightConn) writePackets(context.Context, []*packet) error { return nil }
-func (f *flight4TestMockFlightConn) recvHandshake() <-chan chan struct{}           { return nil }
+func (f *flight4TestMockFlightConn) recvHandshake() <-chan recvHandshakeState      { return nil }
 func (f *flight4TestMockFlightConn) setLocalEpoch(uint16)                          {}
 func (f *flight4TestMockFlightConn) handleQueuedPackets(context.Context) error     { return nil }
 func (f *flight4TestMockFlightConn) sessionKey() []byte                            { return nil }
@@ -32,14 +37,15 @@ type flight4TestMockCipherSuite struct {
 }
 
 func (f *flight4TestMockCipherSuite) IsInitialized() bool {
-	f.t.Fatal("IsInitialized called with Certificate but not CertificateVerify")
+	assert.Fail(f.t, "IsInitialized called with Certificate but not CertificateVerify")
+
 	return true
 }
 
 // Assert that if a Client sends a certificate they
 // must also send a CertificateVerify message.
 // The flight4handler must not interact with the CipherSuite
-// if the CertificateVerify is missing
+// if the CertificateVerify is missing.
 func TestFlight4_Process_CertificateVerify(t *testing.T) {
 	// Limit runtime in case of deadlocks
 	lim := test.TimeOut(5 * time.Second)
@@ -113,7 +119,57 @@ func TestFlight4_Process_CertificateVerify(t *testing.T) {
 	cache.push(rawCertificate, 0, 0, handshake.TypeCertificate, true)
 	cache.push(rawClientKeyExchange, 0, 1, handshake.TypeClientKeyExchange, true)
 
-	if _, _, err := flight4Parse(context.TODO(), mockConn, state, cache, cfg); err != nil {
-		t.Fatal(err)
+	_, _, err := flight4Parse(context.TODO(), mockConn, state, cache, cfg)
+	assert.NoError(t, err)
+}
+
+func TestFlight4_CertificateRequestHook(t *testing.T) {
+	// Limit runtime in case of deadlocks
+	lim := test.TimeOut(5 * time.Second)
+	defer lim.Stop()
+
+	// Check for leaking routines
+	report := test.CheckRoutines(t)
+	defer report()
+
+	localKeypair, err := elliptic.GenerateKeypair(elliptic.P256)
+	assert.NoError(t, err)
+
+	mockConn := &flight4TestMockFlightConn{}
+	state := &State{
+		cipherSuite:  &flight4TestMockCipherSuite{t: t},
+		localKeypair: localKeypair,
 	}
+
+	cert, err := selfsign.GenerateSelfSignedWithDNS("localhost")
+	assert.NoError(t, err)
+
+	cfg := &handshakeConfig{
+		localCertificates:     []tls.Certificate{cert},
+		localSignatureSchemes: signaturehash.Algorithms(),
+		clientAuth:            1,
+		certificateRequestMessageHook: func(mcr handshake.MessageCertificateRequest) handshake.Message {
+			mcr.SignatureHashAlgorithms = []signaturehash.Algorithm{}
+
+			return &mcr
+		},
+	}
+
+	pkts, _, err := flight4Generate(mockConn, state, nil, cfg)
+	assert.NoError(t, err)
+
+	for _, p := range pkts {
+		if h, ok := p.record.Content.(*handshake.Handshake); ok { //nolint:nestif
+			if h.Message.Type() == handshake.TypeCertificateRequest {
+				mcr := &handshake.MessageCertificateRequest{}
+				msg, err := h.Message.Marshal()
+				assert.NoError(t, err)
+				assert.NoError(t, mcr.Unmarshal(msg))
+				if len(mcr.SignatureHashAlgorithms) == 0 {
+					return
+				}
+			}
+		}
+	}
+	assert.Fail(t, "hook failed to modify SignatureHashAlgorithms")
 }

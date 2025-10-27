@@ -4,10 +4,10 @@
 package extension
 
 import (
-	"reflect"
 	"testing"
 
-	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestExtensionSupportedGroups(t *testing.T) {
@@ -17,9 +17,10 @@ func TestExtensionSupportedGroups(t *testing.T) {
 	}
 
 	raw, err := parsedSupportedGroups.Marshal()
-	if err != nil {
-		t.Error(err)
-	} else if !reflect.DeepEqual(raw, rawSupportedGroups) {
-		t.Errorf("extensionSupportedGroups marshal: got %#v, want %#v", raw, rawSupportedGroups)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, rawSupportedGroups, raw)
+
+	roundtrip := &SupportedEllipticCurves{}
+	assert.NoError(t, roundtrip.Unmarshal(raw))
+	assert.Equal(t, parsedSupportedGroups, roundtrip)
 }

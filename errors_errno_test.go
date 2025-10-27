@@ -10,24 +10,33 @@
 package dtls
 
 import (
-	"errors"
 	"net"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestErrorsTemporary(t *testing.T) {
-	addrListen, errListen := net.ResolveUDPAddr("udp", "localhost:0")
-	if errListen != nil {
-		t.Fatalf("Unexpected error: %v", errListen)
-	}
+	// Allocate a UDP port no one is listening on.
+	addrListen, err := net.ResolveUDPAddr("udp", "localhost:0")
+	assert.NoError(t, err)
+
+	listener, err := net.ListenUDP("udp", addrListen)
+	assert.NoError(t, err)
+
+	raddr, ok := listener.LocalAddr().(*net.UDPAddr)
+	assert.True(t, ok)
+	assert.NoError(t, listener.Close())
+
 	// Server is not listening.
-	conn, errDial := net.DialUDP("udp", nil, addrListen)
-	if errDial != nil {
-		t.Fatalf("Unexpected error: %v", errDial)
-	}
+	conn, errDial := net.DialUDP("udp", nil, raddr)
+	assert.NoError(t, errDial)
 
 	_, _ = conn.Write([]byte{0x00}) // trigger
-	_, err := conn.Read(make([]byte, 10))
+	// Avoid indefinite blocking on platforms that don't surface ICMP errors reliably - Windows :)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err = conn.Read(make([]byte, 10))
 	_ = conn.Close()
 
 	if err == nil {
@@ -35,14 +44,12 @@ func TestErrorsTemporary(t *testing.T) {
 	}
 
 	var ne net.Error
-	if !errors.As(netError(err), &ne) {
-		t.Fatalf("netError must return net.Error")
-	}
+	assert.ErrorAs(t, netError(err), &ne)
 
 	if ne.Timeout() {
-		t.Errorf("%v must not be timeout error", err)
+		t.Skip("timed out waiting for ICMP error; skipping on this platform")
 	}
-	if !ne.Temporary() { //nolint:staticcheck
-		t.Errorf("%v must be temporary error", err)
-	}
+
+	assert.False(t, ne.Timeout())
+	assert.True(t, ne.Temporary()) //nolint:staticcheck
 }

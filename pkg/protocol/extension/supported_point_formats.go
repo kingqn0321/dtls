@@ -6,7 +6,7 @@ package extension
 import (
 	"encoding/binary"
 
-	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
 )
 
 const (
@@ -21,35 +21,38 @@ type SupportedPointFormats struct {
 	PointFormats []elliptic.CurvePointFormat
 }
 
-// TypeValue returns the extension TypeValue
+// TypeValue returns the extension TypeValue.
 func (s SupportedPointFormats) TypeValue() TypeValue {
 	return SupportedPointFormatsTypeValue
 }
 
-// Marshal encodes the extension
+// Marshal encodes the extension.
 func (s *SupportedPointFormats) Marshal() ([]byte, error) {
 	out := make([]byte, supportedPointFormatsSize)
 
 	binary.BigEndian.PutUint16(out, uint16(s.TypeValue()))
-	binary.BigEndian.PutUint16(out[2:], uint16(1+(len(s.PointFormats))))
+	binary.BigEndian.PutUint16(out[2:], uint16(1+(len(s.PointFormats)))) //nolint:gosec // G115
 	out[4] = byte(len(s.PointFormats))
 
 	for _, v := range s.PointFormats {
-		out = append(out, byte(v))
+		out = append(out, byte(v)) //nolint:makezero // todo: fix
 	}
+
 	return out, nil
 }
 
-// Unmarshal populates the extension from encoded data
+// Unmarshal populates the extension from encoded data.
 func (s *SupportedPointFormats) Unmarshal(data []byte) error {
 	if len(data) <= supportedPointFormatsSize {
 		return errBufferTooSmall
-	} else if TypeValue(binary.BigEndian.Uint16(data)) != s.TypeValue() {
+	}
+
+	if TypeValue(binary.BigEndian.Uint16(data)) != s.TypeValue() {
 		return errInvalidExtensionType
 	}
 
-	pointFormatCount := int(binary.BigEndian.Uint16(data[4:]))
-	if supportedGroupsHeaderSize+(pointFormatCount) > len(data) {
+	pointFormatCount := int(data[4])
+	if supportedPointFormatsSize+pointFormatCount > len(data) {
 		return errLengthMismatch
 	}
 
@@ -61,5 +64,6 @@ func (s *SupportedPointFormats) Unmarshal(data []byte) error {
 		default:
 		}
 	}
+
 	return nil
 }

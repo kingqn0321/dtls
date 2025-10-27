@@ -4,14 +4,13 @@
 package handshake
 
 import (
-	"bytes"
-	"reflect"
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
-	"github.com/pion/dtls/v2/pkg/protocol"
-	"github.com/pion/dtls/v2/pkg/protocol/extension"
+	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/protocol"
+	"github.com/pion/dtls/v3/pkg/protocol/extension"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestHandshakeMessageClientHello(t *testing.T) {
@@ -26,10 +25,16 @@ func TestHandshakeMessageClientHello(t *testing.T) {
 		Version: protocol.Version{Major: 0xFE, Minor: 0xFD},
 		Random: Random{
 			GMTUnixTime: time.Unix(3056586332, 0),
-			RandomBytes: [28]byte{0x42, 0x54, 0xff, 0x86, 0xe1, 0x24, 0x41, 0x91, 0x42, 0x62, 0x15, 0xad, 0x16, 0xc9, 0x15, 0x8d, 0x95, 0x71, 0x8a, 0xbb, 0x22, 0xd7, 0x47, 0xec, 0xd8, 0x3d, 0xdc, 0x4b},
+			RandomBytes: [28]byte{
+				0x42, 0x54, 0xff, 0x86, 0xe1, 0x24, 0x41, 0x91, 0x42, 0x62, 0x15, 0xad, 0x16, 0xc9,
+				0x15, 0x8d, 0x95, 0x71, 0x8a, 0xbb, 0x22, 0xd7, 0x47, 0xec, 0xd8, 0x3d, 0xdc, 0x4b,
+			},
 		},
 		SessionID: []byte{},
-		Cookie:    []byte{0xe6, 0x14, 0x3a, 0x1b, 0x04, 0xea, 0x9e, 0x7a, 0x14, 0xd6, 0x6c, 0x57, 0xd0, 0x0e, 0x32, 0x85, 0x76, 0x18, 0xde, 0xd8},
+		Cookie: []byte{
+			0xe6, 0x14, 0x3a, 0x1b, 0x04, 0xea, 0x9e, 0x7a, 0x14, 0xd6,
+			0x6c, 0x57, 0xd0, 0x0e, 0x32, 0x85, 0x76, 0x18, 0xde, 0xd8,
+		},
 		CipherSuiteIDs: []uint16{
 			0xc02b,
 			0xc00a,
@@ -43,18 +48,12 @@ func TestHandshakeMessageClientHello(t *testing.T) {
 	}
 
 	c := &MessageClientHello{}
-	if err := c.Unmarshal(rawClientHello); err != nil {
-		t.Error(err)
-	} else if !reflect.DeepEqual(c, parsedClientHello) {
-		t.Errorf("handshakeMessageClientHello unmarshal: got %#v, want %#v", c, parsedClientHello)
-	}
+	assert.NoError(t, c.Unmarshal(rawClientHello))
+	assert.Equal(t, parsedClientHello, c)
 
 	raw, err := c.Marshal()
-	if err != nil {
-		t.Error(err)
-	} else if !reflect.DeepEqual(raw, rawClientHello) {
-		t.Errorf("handshakeMessageClientHello marshal: got %#v, want %#v", raw, rawClientHello)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, rawClientHello, raw)
 }
 
 func TestHandshakeMessageClientHelloSessionID(t *testing.T) {
@@ -76,16 +75,10 @@ func TestHandshakeMessageClientHelloSessionID(t *testing.T) {
 	}
 
 	c := &MessageClientHello{}
-	if err := c.Unmarshal(rawClientHello); err != nil {
-		t.Error(err)
-	} else if !bytes.Equal(c.SessionID, sessionID) {
-		t.Errorf("handshakeMessageClientHello invalid SessionID: got %#v, want %#v", c.SessionID, sessionID)
-	}
+	assert.NoError(t, c.Unmarshal(rawClientHello))
+	assert.Equal(t, sessionID, c.SessionID)
 
 	raw, err := c.Marshal()
-	if err != nil {
-		t.Error(err)
-	} else if !reflect.DeepEqual(raw, rawClientHello) {
-		t.Errorf("handshakeMessageClientHello marshal: got %#v, want %#v", raw, rawClientHello)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, rawClientHello, raw)
 }

@@ -13,11 +13,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v2/pkg/crypto/selfsign"
-	"github.com/pion/transport/v2/test"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	dtlsnet "github.com/pion/dtls/v3/pkg/net"
+	"github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/assert"
 )
 
-var errMessageMissmatch = errors.New("messages missmatch")
+var (
+	errMessageMissmatch       = errors.New("messages missmatch")
+	errInvalidConnectionState = errors.New("failed to get connection state")
+)
 
 func TestResumeClient(t *testing.T) {
 	DoTestResume(t, Client, Server)
@@ -28,11 +33,20 @@ func TestResumeServer(t *testing.T) {
 }
 
 func fatal(t *testing.T, errChan chan error, err error) {
+	t.Helper()
+
 	close(errChan)
-	t.Fatal(err)
+	assert.NoError(t, err)
 }
 
-func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Conn, error)) {
+//nolint:cyclop
+func DoTestResume(
+	t *testing.T,
+	newLocal,
+	newRemote func(net.PacketConn, net.Addr, *Config) (*Conn, error),
+) {
+	t.Helper()
+
 	// Limit runtime in case of deadlocks
 	lim := test.TimeOut(time.Second * 20)
 	defer lim.Stop()
@@ -42,9 +56,7 @@ func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Co
 	defer report()
 
 	certificate, err := selfsign.GenerateSelfSigned()
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 
 	// Generate connections
 	localConn1, rc1 := net.Pipe()
@@ -55,9 +67,7 @@ func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Co
 	errChan := make(chan error, 1)
 	defer func() {
 		err = <-errChan
-		if err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(t, err)
 	}()
 	config := &Config{
 		Certificates:         []tls.Certificate{certificate},
@@ -67,7 +77,7 @@ func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Co
 	go func() {
 		var remote *Conn
 		var errR error
-		remote, errR = newRemote(remoteConn, config)
+		remote, errR = newRemote(dtlsnet.PacketConnFromConn(remoteConn), remoteConn.RemoteAddr(), config)
 		if errR != nil {
 			errChan <- errR
 		}
@@ -77,9 +87,7 @@ func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Co
 			recv := make([]byte, 1024)
 			var n int
 			n, errR = remote.Read(recv)
-			if errR != nil {
-				errChan <- errR
-			}
+			assert.NoError(t, errR)
 
 			if _, errR = remote.Write(recv[:n]); errR != nil {
 				errChan <- errR
@@ -89,7 +97,7 @@ func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Co
 	}()
 
 	var local *Conn
-	local, err = newLocal(localConn1, config)
+	local, err = newLocal(dtlsnet.PacketConnFromConn(localConn1), localConn1.RemoteAddr(), config)
 	if err != nil {
 		fatal(t, errChan, err)
 	}
@@ -119,7 +127,10 @@ func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Co
 	}
 
 	// Serialize and deserialize state
-	state := local.ConnectionState()
+	state, ok := local.ConnectionState()
+	if !ok {
+		fatal(t, errChan, errInvalidConnectionState)
+	}
 	var b []byte
 	b, err = state.MarshalBinary()
 	if err != nil {
@@ -132,7 +143,7 @@ func DoTestResume(t *testing.T, newLocal, newRemote func(net.Conn, *Config) (*Co
 
 	// Resume dtls connection
 	var resumed net.Conn
-	resumed, err = Resume(deserialized, localConn2, config)
+	resumed, err = Resume(deserialized, dtlsnet.PacketConnFromConn(localConn2), localConn2.RemoteAddr(), config)
 	if err != nil {
 		fatal(t, errChan, err)
 	}
@@ -169,8 +180,10 @@ func (b *backupConn) Read(data []byte) (n int, err error) {
 		b.curr = b.next
 		b.next = nil
 		b.mux.Unlock()
+
 		return b.Read(data)
 	}
+
 	return n, err
 }
 
@@ -181,8 +194,10 @@ func (b *backupConn) Write(data []byte) (n int, err error) {
 		b.curr = b.next
 		b.next = nil
 		b.mux.Unlock()
+
 		return b.Write(data)
 	}
+
 	return n, err
 }
 

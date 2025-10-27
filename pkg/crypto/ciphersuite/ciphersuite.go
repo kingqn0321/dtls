@@ -8,19 +8,32 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/pion/dtls/v2/pkg/protocol"
-	"github.com/pion/dtls/v2/pkg/protocol/recordlayer"
+	"github.com/pion/dtls/v3/internal/util"
+	"github.com/pion/dtls/v3/pkg/protocol"
+	"github.com/pion/dtls/v3/pkg/protocol/recordlayer"
+	"golang.org/x/crypto/cryptobyte"
+)
+
+const (
+	// 8 bytes of 0xff.
+	// https://datatracker.ietf.org/doc/html/rfc9146#name-record-payload-protection
+	seqNumPlaceholder = 0xffffffffffffffff
 )
 
 var (
-	errNotEnoughRoomForNonce = &protocol.InternalError{Err: errors.New("buffer not long enough to contain nonce")} //nolint:goerr113
-	errDecryptPacket         = &protocol.TemporaryError{Err: errors.New("failed to decrypt packet")}               //nolint:goerr113
-	errInvalidMAC            = &protocol.TemporaryError{Err: errors.New("invalid mac")}                            //nolint:goerr113
-	errFailedToCast          = &protocol.FatalError{Err: errors.New("failed to cast")}                             //nolint:goerr113
+	//nolint:err113
+	errNotEnoughRoomForNonce = &protocol.InternalError{Err: errors.New("buffer not long enough to contain nonce")}
+	//nolint:err113
+	errDecryptPacket = &protocol.TemporaryError{Err: errors.New("failed to decrypt packet")}
+	//nolint:err113
+	errInvalidMAC = &protocol.TemporaryError{Err: errors.New("invalid mac")}
+	//nolint:err113
+	errFailedToCast = &protocol.FatalError{Err: errors.New("failed to cast")}
 )
 
 func generateAEADAdditionalData(h *recordlayer.Header, payloadLen int) []byte {
 	var additionalData [13]byte
+
 	// SequenceNumber MUST be set first
 	// we only want uint48, clobbering an extra 2 (using uint64, Golang doesn't have uint48)
 	binary.BigEndian.PutUint64(additionalData[:], h.SequenceNumber)
@@ -28,9 +41,29 @@ func generateAEADAdditionalData(h *recordlayer.Header, payloadLen int) []byte {
 	additionalData[8] = byte(h.ContentType)
 	additionalData[9] = h.Version.Major
 	additionalData[10] = h.Version.Minor
+	//nolint:gosec //G115
 	binary.BigEndian.PutUint16(additionalData[len(additionalData)-2:], uint16(payloadLen))
 
 	return additionalData[:]
+}
+
+// generateAEADAdditionalDataCID generates additional data for AEAD ciphers
+// according to https://datatracker.ietf.org/doc/html/rfc9146#name-aead-ciphers
+func generateAEADAdditionalDataCID(h *recordlayer.Header, payloadLen int) []byte {
+	var builder cryptobyte.Builder
+
+	builder.AddUint64(seqNumPlaceholder)
+	builder.AddUint8(uint8(protocol.ContentTypeConnectionID))
+	builder.AddUint8(uint8(len(h.ConnectionID))) //nolint:gosec //G115
+	builder.AddUint8(uint8(protocol.ContentTypeConnectionID))
+	builder.AddUint8(h.Version.Major)
+	builder.AddUint8(h.Version.Minor)
+	builder.AddUint16(h.Epoch)
+	util.AddUint48(&builder, h.SequenceNumber)
+	builder.AddBytes(h.ConnectionID)
+	builder.AddUint16(uint16(payloadLen)) //nolint:gosec //G115
+
+	return builder.BytesOrPanic()
 }
 
 // examinePadding returns, in constant time, the length of the padding to remove
@@ -44,21 +77,19 @@ func examinePadding(payload []byte) (toRemove int, good byte) {
 	}
 
 	paddingLen := payload[len(payload)-1]
-	t := uint(len(payload)-1) - uint(paddingLen)
+	t := uint(len(payload)-1) - uint(paddingLen) //nolint:gosec //G115
 	// if len(payload) >= (paddingLen - 1) then the MSB of t is zero
-	good = byte(int32(^t) >> 31)
+	good = byte(int32(^t) >> 31) //nolint:gosec //G115
 
 	// The maximum possible padding length plus the actual length field
-	toCheck := 256
-	// The length of the padded data is public, so we can use an if here
-	if toCheck > len(payload) {
-		toCheck = len(payload)
-	}
+	toCheck := min(
+		// The length of the padded data is public, so we can use an if here
+		256, len(payload))
 
 	for i := 0; i < toCheck; i++ {
-		t := uint(paddingLen) - uint(i)
+		t := uint(paddingLen) - uint(i) //nolint:gosec //G115
 		// if i <= paddingLen then the MSB of t is zero
-		mask := byte(int32(^t) >> 31)
+		mask := byte(int32(^t) >> 31) //nolint:gosec //G115
 		b := payload[len(payload)-1-i]
 		good &^= mask&paddingLen ^ mask&b
 	}
@@ -68,7 +99,7 @@ func examinePadding(payload []byte) (toRemove int, good byte) {
 	good &= good << 4
 	good &= good << 2
 	good &= good << 1
-	good = uint8(int8(good) >> 7)
+	good = uint8(int8(good) >> 7) //nolint:gosec //G115
 
 	toRemove = int(paddingLen) + 1
 

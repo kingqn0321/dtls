@@ -4,13 +4,13 @@
 package handshake
 
 import (
-	"reflect"
 	"testing"
 
-	"github.com/pion/dtls/v2/internal/ciphersuite/types"
-	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
-	"github.com/pion/dtls/v2/pkg/crypto/hash"
-	"github.com/pion/dtls/v2/pkg/crypto/signature"
+	"github.com/pion/dtls/v3/internal/ciphersuite/types"
+	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/crypto/hash"
+	"github.com/pion/dtls/v3/pkg/crypto/signature"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestHandshakeMessageServerKeyExchange(t *testing.T) {
@@ -18,21 +18,15 @@ func TestHandshakeMessageServerKeyExchange(t *testing.T) {
 		c := &MessageServerKeyExchange{
 			KeyExchangeAlgorithm: types.KeyExchangeAlgorithmEcdhe,
 		}
-		if err := c.Unmarshal(rawServerKeyExchange); err != nil {
-			t.Error(err)
-		} else if !reflect.DeepEqual(c, parsedServerKeyExchange) {
-			t.Errorf("handshakeMessageServerKeyExchange unmarshal: got %#v, want %#v", c, parsedServerKeyExchange)
-		}
+		assert.NoError(t, c.Unmarshal(rawServerKeyExchange))
+		assert.Equal(t, parsedServerKeyExchange, c)
 
 		raw, err := c.Marshal()
-		if err != nil {
-			t.Error(err)
-		} else if !reflect.DeepEqual(raw, rawServerKeyExchange) {
-			t.Errorf("handshakeMessageServerKeyExchange marshal: got %#v, want %#v", raw, rawServerKeyExchange)
-		}
+		assert.NoError(t, err)
+		assert.Equal(t, rawServerKeyExchange, raw)
 	}
 
-	t.Run("Hash+Signature", func(t *testing.T) {
+	t.Run("Hash+Signature", func(*testing.T) {
 		rawServerKeyExchange := []byte{
 			0x03, 0x00, 0x1d, 0x41, 0x04, 0x0c, 0xb9, 0xa3, 0xb9, 0x90, 0x71, 0x35, 0x4a, 0x08, 0x66, 0xaf,
 			0xd6, 0x88, 0x58, 0x29, 0x69, 0x98, 0xf1, 0x87, 0x0f, 0xb5, 0xa8, 0xcd, 0x92, 0xf6, 0x2b, 0x08,
@@ -57,7 +51,7 @@ func TestHandshakeMessageServerKeyExchange(t *testing.T) {
 		test(rawServerKeyExchange, parsedServerKeyExchange)
 	})
 
-	t.Run("Anonymous", func(t *testing.T) {
+	t.Run("Anonymous", func(*testing.T) {
 		rawServerKeyExchange := []byte{
 			0x03, 0x00, 0x1d, 0x41, 0x04, 0x0c, 0xb9, 0xa3, 0xb9, 0x90, 0x71, 0x35, 0x4a, 0x08, 0x66, 0xaf,
 			0xd6, 0x88, 0x58, 0x29, 0x69, 0x98, 0xf1, 0x87, 0x0f, 0xb5, 0xa8, 0xcd, 0x92, 0xf6, 0x2b, 0x08,

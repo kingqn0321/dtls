@@ -6,7 +6,8 @@ package hash
 import (
 	"testing"
 
-	"github.com/pion/dtls/v2/pkg/crypto/fingerprint"
+	"github.com/pion/dtls/v3/pkg/crypto/fingerprint"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestHashAlgorithm_StringRoundtrip(t *testing.T) {
@@ -18,11 +19,7 @@ func TestHashAlgorithm_StringRoundtrip(t *testing.T) {
 		str := algo.String()
 		hash1 := algo.CryptoHash()
 		hash2, err := fingerprint.HashFromString(str)
-		if err != nil {
-			t.Fatalf("fingerprint.HashFromString failed: %v", err)
-		}
-		if hash1 != hash2 {
-			t.Errorf("Hash algorithm mismatch, input: %d, after roundtrip: %d", int(hash1), int(hash2))
-		}
+		assert.NoError(t, err)
+		assert.Equal(t, hash1, hash2)
 	}
 }

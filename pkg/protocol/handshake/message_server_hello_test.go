@@ -4,13 +4,12 @@
 package handshake
 
 import (
-	"bytes"
-	"reflect"
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v2/pkg/protocol"
-	"github.com/pion/dtls/v2/pkg/protocol/extension"
+	"github.com/pion/dtls/v3/pkg/protocol"
+	"github.com/pion/dtls/v3/pkg/protocol/extension"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestHandshakeMessageServerHello(t *testing.T) {
@@ -27,7 +26,10 @@ func TestHandshakeMessageServerHello(t *testing.T) {
 		Version: protocol.Version{Major: 0xFE, Minor: 0xFD},
 		Random: Random{
 			GMTUnixTime: time.Unix(560149025, 0),
-			RandomBytes: [28]byte{0x81, 0x0e, 0x98, 0x6c, 0x85, 0x3d, 0xa4, 0x39, 0xaf, 0x5f, 0xd6, 0x5c, 0xcc, 0x20, 0x7f, 0x7c, 0x78, 0xf1, 0x5f, 0x7e, 0x1c, 0xb7, 0xa1, 0x1e, 0xcf, 0x63, 0x84, 0x28},
+			RandomBytes: [28]byte{
+				0x81, 0x0e, 0x98, 0x6c, 0x85, 0x3d, 0xa4, 0x39, 0xaf, 0x5f, 0xd6, 0x5c, 0xcc, 0x20,
+				0x7f, 0x7c, 0x78, 0xf1, 0x5f, 0x7e, 0x1c, 0xb7, 0xa1, 0x1e, 0xcf, 0x63, 0x84, 0x28,
+			},
 		},
 		SessionID:         []byte{},
 		CipherSuiteID:     &cipherSuiteID,
@@ -36,18 +38,12 @@ func TestHandshakeMessageServerHello(t *testing.T) {
 	}
 
 	c := &MessageServerHello{}
-	if err := c.Unmarshal(rawServerHello); err != nil {
-		t.Error(err)
-	} else if !reflect.DeepEqual(c, parsedServerHello) {
-		t.Errorf("handshakeMessageServerHello unmarshal: got %#v, want %#v", c, parsedServerHello)
-	}
+	assert.NoError(t, c.Unmarshal(rawServerHello))
+	assert.Equal(t, parsedServerHello, c, "handshakeMessageServerHello mismatch")
 
 	raw, err := c.Marshal()
-	if err != nil {
-		t.Error(err)
-	} else if !reflect.DeepEqual(raw, rawServerHello) {
-		t.Errorf("handshakeMessageServerHello marshal: got %#v, want %#v", raw, rawServerHello)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, rawServerHello, raw, "handshakeMessageServerHello mismatch")
 }
 
 func TestHandshakeMessageServerHelloSessionID(t *testing.T) {
@@ -70,16 +66,10 @@ func TestHandshakeMessageServerHelloSessionID(t *testing.T) {
 	}
 
 	c := &MessageServerHello{}
-	if err := c.Unmarshal(rawServerHello); err != nil {
-		t.Error(err)
-	} else if !bytes.Equal(c.SessionID, sessionID) {
-		t.Errorf("handshakeMessageServerHello invalid SessionID: got %#v, want %#v", c.SessionID, sessionID)
-	}
+	assert.NoError(t, c.Unmarshal(rawServerHello))
+	assert.Equal(t, sessionID, c.SessionID, "handshakeMessageServerHello invalid SessionID")
 
 	raw, err := c.Marshal()
-	if err != nil {
-		t.Error(err)
-	} else if !reflect.DeepEqual(raw, rawServerHello) {
-		t.Errorf("handshakeMessageServerHello marshal: got %#v, want %#v", raw, rawServerHello)
-	}
+	assert.NoError(t, err)
+	assert.Equal(t, rawServerHello, raw, "handshakeMessageServerHello mismatch")
 }

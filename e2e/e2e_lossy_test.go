@@ -10,9 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v2"
-	"github.com/pion/dtls/v2/pkg/crypto/selfsign"
-	transportTest "github.com/pion/transport/v2/test"
+	"github.com/pion/dtls/v3"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	dtlsnet "github.com/pion/dtls/v3/pkg/net"
+	transportTest "github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -20,10 +22,9 @@ const (
 	lossyTestTimeout = 30 * time.Second
 )
 
-/*
-DTLS Client/Server over a lossy transport, just asserts it can handle at increasing increments
-*/
-func TestPionE2ELossy(t *testing.T) {
+// DTLS Client/Server over a lossy transport, just asserts it can handle at increasing increments
+
+func TestPionE2ELossy(t *testing.T) { //nolint:cyclop
 	// Check for leaking routines
 	report := transportTest.CheckRoutines(t)
 	defer report()
@@ -34,20 +35,17 @@ func TestPionE2ELossy(t *testing.T) {
 	}
 
 	serverCert, err := selfsign.GenerateSelfSigned()
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 
 	clientCert, err := selfsign.GenerateSelfSigned()
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 
 	for _, test := range []struct {
-		LossChanceRange int
-		DoClientAuth    bool
-		CipherSuites    []dtls.CipherSuiteID
-		MTU             int
+		LossChanceRange             int
+		DoClientAuth                bool
+		CipherSuites                []dtls.CipherSuiteID
+		MTU                         int
+		DisableServerFlightInterval bool
 	}{
 		{
 			LossChanceRange: 0,
@@ -108,6 +106,20 @@ func TestPionE2ELossy(t *testing.T) {
 			MTU:             100,
 			DoClientAuth:    true,
 		},
+		// Incoming retransmitted handshakes should cause us to retransmit. Disabling the FlightInterval on one side
+		// means that a incoming re-transmissions causes the retransmission to be fired
+		{
+			LossChanceRange:             10,
+			DisableServerFlightInterval: true,
+		},
+		{
+			LossChanceRange:             20,
+			DisableServerFlightInterval: true,
+		},
+		{
+			LossChanceRange:             50,
+			DisableServerFlightInterval: true,
+		},
 	} {
 		name := fmt.Sprintf("Loss%d_MTU%d", test.LossChanceRange, test.MTU)
 		if test.DoClientAuth {
@@ -116,50 +128,57 @@ func TestPionE2ELossy(t *testing.T) {
 		for _, ciph := range test.CipherSuites {
 			name += "_With" + ciph.String()
 		}
+		if test.DisableServerFlightInterval {
+			name += "_WithNoServerFlightInterval"
+		}
+
 		test := test
 		t.Run(name, func(t *testing.T) {
 			// Limit runtime in case of deadlocks
 			lim := transportTest.TimeOut(lossyTestTimeout + time.Second)
 			defer lim.Stop()
 
-			rand.Seed(time.Now().UTC().UnixNano())
 			chosenLoss := rand.Intn(9) + test.LossChanceRange //nolint:gosec
 			serverDone := make(chan runResult)
 			clientDone := make(chan runResult)
 			br := transportTest.NewBridge()
 
-			if err = br.SetLossChance(chosenLoss); err != nil {
-				t.Fatal(err)
-			}
+			assert.NoError(t, br.SetLossChance(chosenLoss))
 
 			go func() {
 				cfg := &dtls.Config{
-					FlightInterval:     flightInterval,
-					CipherSuites:       test.CipherSuites,
-					InsecureSkipVerify: true,
-					MTU:                test.MTU,
+					FlightInterval:           flightInterval,
+					CipherSuites:             test.CipherSuites,
+					InsecureSkipVerify:       true,
+					MTU:                      test.MTU,
+					DisableRetransmitBackoff: true,
 				}
 
 				if test.DoClientAuth {
 					cfg.Certificates = []tls.Certificate{clientCert}
 				}
 
-				client, startupErr := dtls.Client(br.GetConn0(), cfg)
+				client, startupErr := dtls.Client(dtlsnet.PacketConnFromConn(br.GetConn0()), br.GetConn0().RemoteAddr(), cfg)
 				clientDone <- runResult{client, startupErr}
 			}()
 
 			go func() {
 				cfg := &dtls.Config{
-					Certificates:   []tls.Certificate{serverCert},
-					FlightInterval: flightInterval,
-					MTU:            test.MTU,
+					Certificates:             []tls.Certificate{serverCert},
+					FlightInterval:           flightInterval,
+					MTU:                      test.MTU,
+					DisableRetransmitBackoff: true,
 				}
 
 				if test.DoClientAuth {
 					cfg.ClientAuth = dtls.RequireAnyClientCert
 				}
 
-				server, startupErr := dtls.Server(br.GetConn1(), cfg)
+				if test.DisableServerFlightInterval {
+					cfg.FlightInterval = time.Hour
+				}
+
+				server, startupErr := dtls.Server(dtlsnet.PacketConnFromConn(br.GetConn1()), br.GetConn1().RemoteAddr(), cfg)
 				serverDone <- runResult{server, startupErr}
 			}()
 
@@ -167,40 +186,38 @@ func TestPionE2ELossy(t *testing.T) {
 			var serverConn, clientConn *dtls.Conn
 			defer func() {
 				if serverConn != nil {
-					if err = serverConn.Close(); err != nil {
-						t.Error(err)
-					}
+					assert.NoError(t, serverConn.Close())
 				}
 				if clientConn != nil {
-					if err = clientConn.Close(); err != nil {
-						t.Error(err)
-					}
+					assert.NoError(t, clientConn.Close())
 				}
 			}()
 
-			for {
-				if serverConn != nil && clientConn != nil {
-					break
-				}
-
+			for serverConn == nil || clientConn == nil {
 				br.Tick()
 				select {
 				case serverResult := <-serverDone:
 					if serverResult.err != nil {
-						t.Errorf("Fail, serverError: clientComplete(%t) serverComplete(%t) LossChance(%d) error(%v)", clientConn != nil, serverConn != nil, chosenLoss, serverResult.err)
+						assert.Failf(t, "Fail, serverError", "clientComplete(%t) serverComplete(%t) LossChance(%d) error(%v)",
+							clientConn != nil, serverConn != nil, chosenLoss, serverResult.err)
+
 						return
 					}
 
 					serverConn = serverResult.dtlsConn
 				case clientResult := <-clientDone:
 					if clientResult.err != nil {
-						t.Errorf("Fail, clientError: clientComplete(%t) serverComplete(%t) LossChance(%d) error(%v)", clientConn != nil, serverConn != nil, chosenLoss, clientResult.err)
+						assert.Failf(t, "Fail, clientError", "clientComplete(%t) serverComplete(%t) LossChance(%d) error(%v)",
+							clientConn != nil, serverConn != nil, chosenLoss, clientResult.err)
+
 						return
 					}
 
 					clientConn = clientResult.dtlsConn
 				case <-testTimer.C:
-					t.Errorf("Test expired: clientComplete(%t) serverComplete(%t) LossChance(%d)", clientConn != nil, serverConn != nil, chosenLoss)
+					assert.Failf(t, "Test expired", "clientComplete(%t) serverComplete(%t) LossChance(%d)",
+						clientConn != nil, serverConn != nil, chosenLoss)
+
 					return
 				case <-time.After(10 * time.Millisecond):
 				}

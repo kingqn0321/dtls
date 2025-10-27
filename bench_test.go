@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v2/pkg/crypto/selfsign"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	dtlsnet "github.com/pion/dtls/v3/pkg/net"
 	"github.com/pion/logging"
-	"github.com/pion/transport/v2/dpipe"
-	"github.com/pion/transport/v2/test"
+	"github.com/pion/transport/v3/dpipe"
+	"github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestSimpleReadWrite(t *testing.T) {
@@ -24,92 +26,78 @@ func TestSimpleReadWrite(t *testing.T) {
 
 	ca, cb := dpipe.Pipe()
 	certificate, err := selfsign.GenerateSelfSigned()
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 	gotHello := make(chan struct{})
 
 	go func() {
-		server, sErr := testServer(ctx, cb, &Config{
+		server, sErr := testServer(ctx, dtlsnet.PacketConnFromConn(cb), cb.RemoteAddr(), &Config{
 			Certificates:  []tls.Certificate{certificate},
 			LoggerFactory: logging.NewDefaultLoggerFactory(),
 		}, false)
-		if sErr != nil {
-			t.Error(sErr)
-			return
-		}
+		assert.NoError(t, sErr)
+
 		buf := make([]byte, 1024)
-		if _, sErr = server.Read(buf); sErr != nil {
-			t.Error(sErr)
-		}
+		_, sErr = server.Read(buf) //nolint:contextcheck
+		assert.NoError(t, sErr)
+
 		gotHello <- struct{}{}
-		if sErr = server.Close(); sErr != nil { //nolint:contextcheck
-			t.Error(sErr)
-		}
+		assert.NoError(t, server.Close()) //nolint:contextcheck
 	}()
 
-	client, err := testClient(ctx, ca, &Config{
+	client, err := testClient(ctx, dtlsnet.PacketConnFromConn(ca), ca.RemoteAddr(), &Config{
 		LoggerFactory:      logging.NewDefaultLoggerFactory(),
 		InsecureSkipVerify: true,
 	}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = client.Write([]byte("hello")); err != nil {
-		t.Error(err)
-	}
+	assert.NoError(t, err)
+	_, err = client.Write([]byte("hello"))
+	assert.NoError(t, err)
 	select {
 	case <-gotHello:
 		// OK
 	case <-time.After(time.Second * 5):
-		t.Error("timeout")
+		assert.Fail(t, "timeout")
 	}
-
-	if err = client.Close(); err != nil {
-		t.Error(err)
-	}
+	assert.NoError(t, client.Close())
 }
 
-func benchmarkConn(b *testing.B, n int64) {
-	b.Run(fmt.Sprintf("%d", n), func(b *testing.B) {
+func benchmarkConn(b *testing.B, payloadSize int64) {
+	b.Helper()
+
+	b.Run(fmt.Sprintf("%d", payloadSize), func(b *testing.B) {
 		ctx := context.Background()
 
 		ca, cb := dpipe.Pipe()
 		certificate, err := selfsign.GenerateSelfSigned()
+		assert.NoError(b, err)
 		server := make(chan *Conn)
+
 		go func() {
-			s, sErr := testServer(ctx, cb, &Config{
+			s, sErr := testServer(ctx, dtlsnet.PacketConnFromConn(cb), cb.RemoteAddr(), &Config{
 				Certificates: []tls.Certificate{certificate},
 			}, false)
-			if err != nil {
-				b.Error(sErr)
-				return
-			}
+			assert.NoError(b, sErr)
+
 			server <- s
 		}()
-		if err != nil {
-			b.Fatal(err)
-		}
-		hw := make([]byte, n)
+
+		hw := make([]byte, payloadSize)
 		b.ReportAllocs()
 		b.SetBytes(int64(len(hw)))
 		go func() {
-			client, cErr := testClient(ctx, ca, &Config{InsecureSkipVerify: true}, false)
-			if cErr != nil {
-				b.Error(err)
-			}
+			client, cErr := testClient(
+				ctx, dtlsnet.PacketConnFromConn(ca), ca.RemoteAddr(), &Config{InsecureSkipVerify: true}, false,
+			)
+			assert.NoError(b, cErr)
 			for {
-				if _, cErr = client.Write(hw); cErr != nil { //nolint:contextcheck
-					b.Error(err)
-				}
+				_, cErr = client.Write(hw) //nolint:contextcheck
+				assert.NoError(b, cErr)
 			}
 		}()
 		s := <-server
 		buf := make([]byte, 2048)
 		for i := 0; i < b.N; i++ {
-			if _, err = s.Read(buf); err != nil {
-				b.Error(err)
-			}
+			_, err = s.Read(buf)
+			assert.NoError(b, err)
 		}
 	})
 }

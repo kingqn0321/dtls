@@ -10,8 +10,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/pion/dtls/v2/pkg/protocol"
-	"github.com/pion/dtls/v2/pkg/protocol/recordlayer"
+	"github.com/pion/dtls/v3/pkg/protocol"
+	"github.com/pion/dtls/v3/pkg/protocol/recordlayer"
 )
 
 const (
@@ -19,13 +19,13 @@ const (
 	gcmNonceLength = 12
 )
 
-// GCM Provides an API to Encrypt/Decrypt DTLS 1.2 Packets
+// GCM Provides an API to Encrypt/Decrypt DTLS 1.2 Packets.
 type GCM struct {
 	localGCM, remoteGCM         cipher.AEAD
 	localWriteIV, remoteWriteIV []byte
 }
 
-// NewGCM creates a DTLS GCM Cipher
+// NewGCM creates a DTLS GCM Cipher.
 func NewGCM(localKey, localWriteIV, remoteKey, remoteWriteIV []byte) (*GCM, error) {
 	localBlock, err := aes.NewCipher(localKey)
 	if err != nil {
@@ -53,10 +53,10 @@ func NewGCM(localKey, localWriteIV, remoteKey, remoteWriteIV []byte) (*GCM, erro
 	}, nil
 }
 
-// Encrypt encrypt a DTLS RecordLayer message
+// Encrypt encrypt a DTLS RecordLayer message.
 func (g *GCM) Encrypt(pkt *recordlayer.RecordLayer, raw []byte) ([]byte, error) {
-	payload := raw[recordlayer.HeaderSize:]
-	raw = raw[:recordlayer.HeaderSize]
+	payload := raw[pkt.Header.Size():]
+	raw = raw[:pkt.Header.Size()]
 
 	nonce := make([]byte, gcmNonceLength)
 	copy(nonce, g.localWriteIV[:4])
@@ -64,7 +64,12 @@ func (g *GCM) Encrypt(pkt *recordlayer.RecordLayer, raw []byte) ([]byte, error) 
 		return nil, err
 	}
 
-	additionalData := generateAEADAdditionalData(&pkt.Header, len(payload))
+	var additionalData []byte
+	if pkt.Header.ContentType == protocol.ContentTypeConnectionID {
+		additionalData = generateAEADAdditionalDataCID(&pkt.Header, len(payload))
+	} else {
+		additionalData = generateAEADAdditionalData(&pkt.Header, len(payload))
+	}
 	encryptedPayload := g.localGCM.Seal(nil, nonce, payload, additionalData)
 	r := make([]byte, len(raw)+len(nonce[4:])+len(encryptedPayload))
 	copy(r, raw)
@@ -72,32 +77,38 @@ func (g *GCM) Encrypt(pkt *recordlayer.RecordLayer, raw []byte) ([]byte, error) 
 	copy(r[len(raw)+len(nonce[4:]):], encryptedPayload)
 
 	// Update recordLayer size to include explicit nonce
-	binary.BigEndian.PutUint16(r[recordlayer.HeaderSize-2:], uint16(len(r)-recordlayer.HeaderSize))
+	binary.BigEndian.PutUint16(r[pkt.Header.Size()-2:], uint16(len(r)-pkt.Header.Size())) //nolint:gosec //G115
+
 	return r, nil
 }
 
-// Decrypt decrypts a DTLS RecordLayer message
-func (g *GCM) Decrypt(in []byte) ([]byte, error) {
-	var h recordlayer.Header
-	err := h.Unmarshal(in)
+// Decrypt decrypts a DTLS RecordLayer message.
+func (g *GCM) Decrypt(header recordlayer.Header, in []byte) ([]byte, error) {
+	err := header.Unmarshal(in)
 	switch {
 	case err != nil:
 		return nil, err
-	case h.ContentType == protocol.ContentTypeChangeCipherSpec:
+	case header.ContentType == protocol.ContentTypeChangeCipherSpec:
 		// Nothing to encrypt with ChangeCipherSpec
 		return in, nil
-	case len(in) <= (8 + recordlayer.HeaderSize):
+	case len(in) <= (8 + header.Size()):
 		return nil, errNotEnoughRoomForNonce
 	}
 
 	nonce := make([]byte, 0, gcmNonceLength)
-	nonce = append(append(nonce, g.remoteWriteIV[:4]...), in[recordlayer.HeaderSize:recordlayer.HeaderSize+8]...)
-	out := in[recordlayer.HeaderSize+8:]
+	nonce = append(append(nonce, g.remoteWriteIV[:4]...), in[header.Size():header.Size()+8]...)
+	out := in[header.Size()+8:]
 
-	additionalData := generateAEADAdditionalData(&h, len(out)-gcmTagLength)
+	var additionalData []byte
+	if header.ContentType == protocol.ContentTypeConnectionID {
+		additionalData = generateAEADAdditionalDataCID(&header, len(out)-gcmTagLength)
+	} else {
+		additionalData = generateAEADAdditionalData(&header, len(out)-gcmTagLength)
+	}
 	out, err = g.remoteGCM.Open(out[:0], nonce, out, additionalData)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errDecryptPacket, err) //nolint:errorlint
 	}
-	return append(in[:recordlayer.HeaderSize], out...), nil
+
+	return append(in[:header.Size()], out...), nil
 }

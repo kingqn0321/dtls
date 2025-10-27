@@ -4,16 +4,18 @@
 package dtls
 
 import (
-	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"net"
 	"time"
 
-	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/protocol/handshake"
 	"github.com/pion/logging"
 )
 
@@ -44,6 +46,10 @@ type Config struct {
 	// Servers will assert that clients send one of these profiles and will respond as needed
 	SRTPProtectionProfiles []SRTPProtectionProfile
 
+	// SRTPMasterKeyIdentifier value (if any) is sent via the use_srtp
+	// extension for Clients and Servers
+	SRTPMasterKeyIdentifier []byte
+
 	// ClientAuth determines the server's policy for
 	// TLS Client Authentication. The default is NoClientCert.
 	ClientAuth ClientAuthType
@@ -55,6 +61,10 @@ type Config struct {
 	// FlightInterval controls how often we send outbound handshake messages
 	// defaults to time.Second
 	FlightInterval time.Duration
+
+	// DisableRetransmitBackoff can be used to the disable the backoff feature
+	// when sending outbound messages as specified in RFC 4347 4.2.4.1
+	DisableRetransmitBackoff bool
 
 	// PSK sets the pre-shared key used by this DTLS connection
 	// If PSK is non-nil only PSK CipherSuites will be used
@@ -112,15 +122,6 @@ type Config struct {
 
 	LoggerFactory logging.LoggerFactory
 
-	// ConnectContextMaker is a function to make a context used in Dial(),
-	// Client(), Server(), and Accept(). If nil, the default ConnectContextMaker
-	// is used. It can be implemented as following.
-	//
-	// 	func ConnectContextMaker() (context.Context, func()) {
-	// 		return context.WithTimeout(context.Background(), 30*time.Second)
-	// 	}
-	ConnectContextMaker func() (context.Context, func())
-
 	// MTU is the length at which handshake messages will be fragmented to
 	// fit within the maximum transmission unit (default is 1200 bytes)
 	MTU int
@@ -176,17 +177,53 @@ type Config struct {
 	// skip hello verify phase and receive ServerHello after initial ClientHello.
 	// This have implication on DoS attack resistance.
 	InsecureSkipVerifyHello bool
-}
 
-func defaultConnectContextMaker() (context.Context, func()) {
-	return context.WithTimeout(context.Background(), 30*time.Second)
-}
+	// ConnectionIDGenerator generates connection identifiers that should be
+	// sent by the remote party if it supports the DTLS Connection Identifier
+	// extension, as determined during the handshake. Generated connection
+	// identifiers must always have the same length. Returning a zero-length
+	// connection identifier indicates that the local party supports sending
+	// connection identifiers but does not require the remote party to send
+	// them. A nil ConnectionIDGenerator indicates that connection identifiers
+	// are not supported.
+	// https://datatracker.ietf.org/doc/html/rfc9146
+	ConnectionIDGenerator func() []byte
 
-func (c *Config) connectContextMaker() (context.Context, func()) {
-	if c.ConnectContextMaker == nil {
-		return defaultConnectContextMaker()
-	}
-	return c.ConnectContextMaker()
+	// PaddingLengthGenerator generates the number of padding bytes used to
+	// inflate ciphertext size in order to obscure content size from observers.
+	// The length of the content is passed to the generator such that both
+	// deterministic and random padding schemes can be applied while not
+	// exceeding maximum record size.
+	// If no PaddingLengthGenerator is specified, padding will not be applied.
+	// https://datatracker.ietf.org/doc/html/rfc9146#section-4
+	PaddingLengthGenerator func(uint) uint
+
+	// HelloRandomBytesGenerator generates custom client hello random bytes.
+	HelloRandomBytesGenerator func() [handshake.RandomBytesLength]byte
+
+	// Handshake hooks: hooks can be used for testing invalid messages,
+	// mimicking other implementations or randomizing fields, which is valuable
+	// for applications that need censorship-resistance by making
+	// fingerprinting more difficult.
+
+	// ClientHelloMessageHook, if not nil, is called when a Client Hello message is sent
+	// from a client. The returned handshake message replaces the original message.
+	ClientHelloMessageHook func(handshake.MessageClientHello) handshake.Message
+
+	// ServerHelloMessageHook, if not nil, is called when a Server Hello message is sent
+	// from a server. The returned handshake message replaces the original message.
+	ServerHelloMessageHook func(handshake.MessageServerHello) handshake.Message
+
+	// CertificateRequestMessageHook, if not nil, is called when a Certificate Request
+	// message is sent from a server. The returned handshake message replaces the original message.
+	CertificateRequestMessageHook func(handshake.MessageCertificateRequest) handshake.Message
+
+	// OnConnectionAttempt is fired Whenever a connection attempt is made,
+	// the server or application can call this callback function.
+	// The callback function can then implement logic to handle the connection attempt, such as logging the attempt,
+	// checking against a list of blocked IPs, or counting the attempts to prevent brute force attacks.
+	// If the callback function returns an error, the connection attempt will be aborted.
+	OnConnectionAttempt func(net.Addr) error
 }
 
 func (c *Config) includeCertificateSuites() bool {
@@ -198,14 +235,14 @@ const defaultMTU = 1200 // bytes
 var defaultCurves = []elliptic.Curve{elliptic.X25519, elliptic.P256, elliptic.P384} //nolint:gochecknoglobals
 
 // PSKCallback is called once we have the remote's PSKIdentityHint.
-// If the remote provided none it will be nil
+// If the remote provided none it will be nil.
 type PSKCallback func([]byte) ([]byte, error)
 
 // ClientAuthType declares the policy the server will follow for
 // TLS Client Authentication.
 type ClientAuthType int
 
-// ClientAuthType enums
+// ClientAuthType enums.
 const (
 	NoClientCert ClientAuthType = iota
 	RequestClientCert
@@ -215,17 +252,17 @@ const (
 )
 
 // ExtendedMasterSecretType declares the policy the client and server
-// will follow for the Extended Master Secret extension
+// will follow for the Extended Master Secret extension.
 type ExtendedMasterSecretType int
 
-// ExtendedMasterSecretType enums
+// ExtendedMasterSecretType enums.
 const (
 	RequestExtendedMasterSecret ExtendedMasterSecretType = iota
 	RequireExtendedMasterSecret
 	DisableExtendedMasterSecret
 )
 
-func validateConfig(config *Config) error {
+func validateConfig(config *Config) error { //nolint:cyclop
 	switch {
 	case config == nil:
 		return errNoConfigProvided
@@ -238,16 +275,23 @@ func validateConfig(config *Config) error {
 			return errInvalidCertificate
 		}
 		if cert.PrivateKey != nil {
-			switch cert.PrivateKey.(type) {
-			case ed25519.PrivateKey:
-			case *ecdsa.PrivateKey:
-			case *rsa.PrivateKey:
+			signer, ok := cert.PrivateKey.(crypto.Signer)
+			if !ok {
+				return errInvalidPrivateKey
+			}
+			switch signer.Public().(type) {
+			case ed25519.PublicKey:
+			case *ecdsa.PublicKey:
+			case *rsa.PublicKey:
 			default:
 				return errInvalidPrivateKey
 			}
 		}
 	}
 
-	_, err := parseCipherSuites(config.CipherSuites, config.CustomCipherSuites, config.includeCertificateSuites(), config.PSK != nil)
+	_, err := parseCipherSuites(
+		config.CipherSuites, config.CustomCipherSuites, config.includeCertificateSuites(), config.PSK != nil,
+	)
+
 	return err
 }

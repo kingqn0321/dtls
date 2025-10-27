@@ -12,13 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pion/dtls/v2/pkg/crypto/selfsign"
-	"github.com/pion/dtls/v2/pkg/crypto/signaturehash"
-	"github.com/pion/dtls/v2/pkg/protocol/alert"
-	"github.com/pion/dtls/v2/pkg/protocol/handshake"
-	"github.com/pion/dtls/v2/pkg/protocol/recordlayer"
+	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	"github.com/pion/dtls/v3/pkg/crypto/signaturehash"
+	"github.com/pion/dtls/v3/pkg/protocol/alert"
+	"github.com/pion/dtls/v3/pkg/protocol/handshake"
+	"github.com/pion/dtls/v3/pkg/protocol/recordlayer"
 	"github.com/pion/logging"
-	"github.com/pion/transport/v2/test"
+	"github.com/pion/transport/v3/test"
+	"github.com/stretchr/testify/assert"
 )
 
 const nonZeroRetransmitInterval = 100 * time.Millisecond
@@ -35,16 +36,14 @@ func TestWriteKeyLog(t *testing.T) {
 	// Secrets follow the format <Label> <space> <ClientRandom> <space> <Secret>
 	// https://developer.mozilla.org/en-US/docs/Mozilla/Projects/NSS/Key_Log_Format
 	want := "LABEL aabbcc ddeeff\n"
-	if buf.String() != want {
-		t.Fatalf("Got %s want %s", buf.String(), want)
-	}
+	assert.Equal(t, want, buf.String())
 
 	// no key log writer = no writes
 	cfg = handshakeConfig{}
 	cfg.writeKeyLog("LABEL", []byte{0xAA, 0xBB, 0xCC}, []byte{0xDD, 0xEE, 0xFF})
 }
 
-func TestHandshaker(t *testing.T) {
+func TestHandshaker(t *testing.T) { //nolint:gocyclo,cyclop,maintidx
 	// Check for leaking routines
 	report := test.CheckRoutines(t)
 	defer report()
@@ -53,13 +52,9 @@ func TestHandshaker(t *testing.T) {
 	logger := loggerFactory.NewLogger("dtls")
 
 	cipherSuites, err := parseCipherSuites(nil, nil, true, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 	clientCert, err := selfsign.GenerateSelfSigned()
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(t, err)
 
 	genFilters := map[string]func() (TestEndpoint, TestEndpoint, func(t *testing.T)){
 		"PassThrough": func() (TestEndpoint, TestEndpoint, func(t *testing.T)) {
@@ -84,6 +79,7 @@ func TestHandshaker(t *testing.T) {
 							cntClientHelloNoCookie++
 						}
 					}
+
 					return true
 				},
 			}
@@ -96,22 +92,20 @@ func TestHandshaker(t *testing.T) {
 					}
 					if _, ok := h.Message.(*handshake.MessageHelloVerifyRequest); ok {
 						cntHelloVerifyRequest++
+
 						return cntHelloVerifyRequest > helloVerifyDrop
 					}
+
 					return true
 				},
 			}
 
 			report := func(t *testing.T) {
-				if cntHelloVerifyRequest != helloVerifyDrop+1 {
-					t.Errorf("Number of HelloVerifyRequest retransmit is wrong, expected: %d times, got: %d times", helloVerifyDrop+1, cntHelloVerifyRequest)
-				}
-				if cntClientHelloNoCookie != cntHelloVerifyRequest {
-					t.Errorf(
-						"HelloVerifyRequest must be triggered only by ClientHello, but HelloVerifyRequest was sent %d times and ClientHello was sent %d times",
-						cntHelloVerifyRequest, cntClientHelloNoCookie,
-					)
-				}
+				t.Helper()
+
+				assert.Equal(t, cntHelloVerifyRequest, helloVerifyDrop+1, "Number of HelloVerifyRequest retransmit is wrong")
+				assert.Equal(t, cntHelloVerifyRequest, cntClientHelloNoCookie,
+					"Number of ClientHello without cookie should match the number of HelloVerifyRequest sent.")
 			}
 
 			return clientEndpoint, serverEndpoint, report
@@ -132,6 +126,7 @@ func TestHandshaker(t *testing.T) {
 					if _, ok := h.Message.(*handshake.MessageFinished); ok {
 						cntClientFinished++
 					}
+
 					return true
 				},
 			}
@@ -145,17 +140,16 @@ func TestHandshaker(t *testing.T) {
 					if _, ok := h.Message.(*handshake.MessageFinished); ok {
 						cntServerFinished++
 					}
+
 					return true
 				},
 			}
 
 			report := func(t *testing.T) {
-				if cntClientFinished != 1 {
-					t.Errorf("Number of client finished is wrong, expected: %d times, got: %d times", 1, cntClientFinished)
-				}
-				if cntServerFinished != 1 {
-					t.Errorf("Number of server finished is wrong, expected: %d times, got: %d times", 1, cntServerFinished)
-				}
+				t.Helper()
+
+				assert.Equal(t, 1, cntClientFinished)
+				assert.Equal(t, 1, cntServerFinished)
 			}
 
 			return clientEndpoint, serverEndpoint, report
@@ -184,6 +178,7 @@ func TestHandshaker(t *testing.T) {
 							cntClientFinished++
 						}
 					}
+
 					return true
 				},
 				Delay: 0,
@@ -206,6 +201,7 @@ func TestHandshaker(t *testing.T) {
 							cntServerFinished++
 						}
 					}
+
 					return true
 				},
 				Delay: 1000 * time.Millisecond,
@@ -216,28 +212,21 @@ func TestHandshaker(t *testing.T) {
 			}
 
 			report := func(t *testing.T) {
-				// with one second server delay and 100 ms retransmit, there should be close to 10 `Finished` from client
-				// using a range of 9 - 11 for checking
-				if cntClientFinished < 8 || cntClientFinished > 11 {
-					t.Errorf("Number of client finished is wrong, expected: %d - %d times, got: %d times", 9, 11, cntClientFinished)
-				}
-				if !isClientFinished {
-					t.Errorf("Client is not finished")
-				}
+				t.Helper()
+
+				// with one second server delay and 100 ms retransmit (+ exponential backoff),
+				// there should be close to 4 `Finished` from client
+				// using a range of 3 - 5 for checking.
+				assert.LessOrEqual(t, 3, cntClientFinished, "Number of client finished should be greater than 3")
+				assert.GreaterOrEqual(t, 5, cntClientFinished, "Number of client finished should be less than 5")
+				assert.True(t, isClientFinished)
 				// there should be no `Finished` last retransmit from client
-				if cntClientFinishedLastRetransmit != 0 {
-					t.Errorf("Number of client finished last retransmit is wrong, expected: %d times, got: %d times", 0, cntClientFinishedLastRetransmit)
-				}
-				if cntServerFinished < 1 {
-					t.Errorf("Number of server finished is wrong, expected: at least %d times, got: %d times", 1, cntServerFinished)
-				}
-				if !isServerFinished {
-					t.Errorf("Server is not finished")
-				}
-				// there should be `Finished` last retransmit from server. Because of slow server, client would have sent several `Finished`.
-				if cntServerFinishedLastRetransmit < 1 {
-					t.Errorf("Number of server finished last retransmit is wrong, expected: at least %d times, got: %d times", 1, cntServerFinishedLastRetransmit)
-				}
+				assert.Equal(t, 0, cntClientFinishedLastRetransmit, "Number of client finished last retransmit greater than zero")
+				assert.LessOrEqual(t, 1, cntServerFinished, "Number of server finished less than 1")
+				assert.True(t, isServerFinished)
+				// there should be `Finished` last retransmit from server.
+				// Because of slow server, client would have sent several `Finished`.
+				assert.LessOrEqual(t, 1, cntServerFinished, "Number of server finished last retransmit is less than 1")
 			}
 
 			return clientEndpoint, serverEndpoint, report
@@ -271,7 +260,7 @@ func TestHandshaker(t *testing.T) {
 					localSignatureSchemes: signaturehash.Algorithms(),
 					insecureSkipVerify:    true,
 					log:                   logger,
-					onFlightState: func(f flightVal, s handshakeState) {
+					onFlightState: func(_ flightVal, s handshakeState) {
 						if s == handshakeFinished {
 							if clientEndpoint.OnFinished != nil {
 								clientEndpoint.OnFinished()
@@ -281,7 +270,7 @@ func TestHandshaker(t *testing.T) {
 							})
 						}
 					},
-					retransmitInterval: nonZeroRetransmitInterval,
+					initialRetransmitInterval: nonZeroRetransmitInterval,
 				}
 
 				fsm := newHandshakeFSM(&ca.state, ca.handshakeCache, cfg, flight1)
@@ -289,9 +278,9 @@ func TestHandshaker(t *testing.T) {
 				switch {
 				case errors.Is(err, context.Canceled):
 				case errors.Is(err, context.DeadlineExceeded):
-					t.Error("Timeout")
+					assert.Fail(t, "timeout")
 				default:
-					t.Error(err)
+					assert.Failf(t, "Handshake failed", "Error: %v", err)
 				}
 			}()
 
@@ -304,7 +293,7 @@ func TestHandshaker(t *testing.T) {
 					localSignatureSchemes: signaturehash.Algorithms(),
 					insecureSkipVerify:    true,
 					log:                   logger,
-					onFlightState: func(f flightVal, s handshakeState) {
+					onFlightState: func(_ flightVal, s handshakeState) {
 						if s == handshakeFinished {
 							if serverEndpoint.OnFinished != nil {
 								serverEndpoint.OnFinished()
@@ -314,7 +303,7 @@ func TestHandshaker(t *testing.T) {
 							})
 						}
 					},
-					retransmitInterval: nonZeroRetransmitInterval,
+					initialRetransmitInterval: nonZeroRetransmitInterval,
 				}
 
 				fsm := newHandshakeFSM(&cb.state, cb.handshakeCache, cfg, flight0)
@@ -322,9 +311,9 @@ func TestHandshaker(t *testing.T) {
 				switch {
 				case errors.Is(err, context.Canceled):
 				case errors.Is(err, context.DeadlineExceeded):
-					t.Error("Timeout")
+					assert.Fail(t, "timeout")
 				default:
-					t.Error(err)
+					assert.Failf(t, "Handshake failed", "Error: %v", err)
 				}
 			}()
 
@@ -346,11 +335,16 @@ type TestEndpoint struct {
 	FinishWait time.Duration
 }
 
-func flightTestPipe(ctx context.Context, clientEndpoint TestEndpoint, serverEndpoint TestEndpoint) (*flightTestConn, *flightTestConn) {
+func flightTestPipe(
+	ctx context.Context,
+	clientEndpoint TestEndpoint,
+	serverEndpoint TestEndpoint,
+) (*flightTestConn, *flightTestConn) {
 	ca := newHandshakeCache()
 	cb := newHandshakeCache()
-	chA := make(chan chan struct{})
-	chB := make(chan chan struct{})
+	chA := make(chan recvHandshakeState)
+	chB := make(chan recvHandshakeState)
+
 	return &flightTestConn{
 			handshakeCache: ca,
 			otherEndCache:  cb,
@@ -373,7 +367,7 @@ func flightTestPipe(ctx context.Context, clientEndpoint TestEndpoint, serverEndp
 type flightTestConn struct {
 	state          State
 	handshakeCache *handshakeCache
-	recv           chan chan struct{}
+	recv           chan recvHandshakeState
 	done           <-chan struct{}
 	epoch          uint16
 
@@ -382,10 +376,10 @@ type flightTestConn struct {
 	delay time.Duration
 
 	otherEndCache *handshakeCache
-	otherEndRecv  chan chan struct{}
+	otherEndRecv  chan recvHandshakeState
 }
 
-func (c *flightTestConn) recvHandshake() <-chan chan struct{} {
+func (c *flightTestConn) recvHandshake() <-chan recvHandshakeState {
 	return c.recv
 }
 
@@ -399,35 +393,46 @@ func (c *flightTestConn) notify(context.Context, alert.Level, alert.Description)
 
 func (c *flightTestConn) writePackets(_ context.Context, pkts []*packet) error {
 	time.Sleep(c.delay)
-	for _, p := range pkts {
-		if c.filter != nil && !c.filter(p) {
+	for _, pkt := range pkts {
+		if c.filter != nil && !c.filter(pkt) {
 			continue
 		}
-		if h, ok := p.record.Content.(*handshake.Handshake); ok {
-			handshakeRaw, err := p.record.Marshal()
+		if handshake, ok := pkt.record.Content.(*handshake.Handshake); ok {
+			handshakeRaw, err := pkt.record.Marshal()
 			if err != nil {
 				return err
 			}
 
-			c.handshakeCache.push(handshakeRaw[recordlayer.HeaderSize:], p.record.Header.Epoch, h.Header.MessageSequence, h.Header.Type, c.state.isClient)
+			c.handshakeCache.push(
+				handshakeRaw[recordlayer.FixedHeaderSize:],
+				pkt.record.Header.Epoch,
+				handshake.Header.MessageSequence,
+				handshake.Header.Type,
+				c.state.isClient,
+			)
 
-			content, err := h.Message.Marshal()
+			content, err := handshake.Message.Marshal()
 			if err != nil {
 				return err
 			}
-			h.Header.Length = uint32(len(content))
-			h.Header.FragmentLength = uint32(len(content))
-			hdr, err := h.Header.Marshal()
+			handshake.Header.Length = uint32(len(content))         //nolint:gosec // G115
+			handshake.Header.FragmentLength = uint32(len(content)) //nolint:gosec // G115
+			hdr, err := handshake.Header.Marshal()
 			if err != nil {
 				return err
 			}
 			c.otherEndCache.push(
-				append(hdr, content...), p.record.Header.Epoch, h.Header.MessageSequence, h.Header.Type, c.state.isClient)
+				append(hdr, content...),
+				pkt.record.Header.Epoch,
+				handshake.Header.MessageSequence,
+				handshake.Header.Type,
+				c.state.isClient,
+			)
 		}
 	}
 	go func() {
 		select {
-		case c.otherEndRecv <- make(chan struct{}):
+		case c.otherEndRecv <- recvHandshakeState{done: make(chan struct{})}:
 		case <-c.done:
 		}
 	}()

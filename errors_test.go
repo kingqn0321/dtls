@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 var errExample = errors.New("an example error")
@@ -43,10 +45,7 @@ func TestErrorUnwrap(t *testing.T) {
 		t.Run(fmt.Sprintf("%T", c.err), func(t *testing.T) {
 			err := c.err
 			for _, unwrapped := range c.errUnwrapped {
-				e := errors.Unwrap(err)
-				if !errors.Is(e, unwrapped) {
-					t.Errorf("Unwrapped error is expected to be '%v', got '%v'", unwrapped, e)
-				}
+				assert.ErrorIs(t, errors.Unwrap(err), unwrapped)
 			}
 		})
 	}
@@ -65,22 +64,14 @@ func TestErrorNetError(t *testing.T) {
 		{&HandshakeError{Err: errExample}, "handshake error: an example error", false, false},
 		{&HandshakeError{Err: &TimeoutError{Err: errExample}}, "handshake error: dtls timeout: an example error", true, true},
 	}
-	for _, c := range cases {
-		c := c
-		t.Run(fmt.Sprintf("%T", c.err), func(t *testing.T) {
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(fmt.Sprintf("%T", testCase.err), func(t *testing.T) {
 			var ne net.Error
-			if !errors.As(c.err, &ne) {
-				t.Fatalf("%T doesn't implement net.Error", c.err)
-			}
-			if ne.Timeout() != c.timeout {
-				t.Errorf("%T.Timeout() should be %v", c.err, c.timeout)
-			}
-			if ne.Temporary() != c.temporary { //nolint:staticcheck
-				t.Errorf("%T.Temporary() should be %v", c.err, c.temporary)
-			}
-			if ne.Error() != c.str {
-				t.Errorf("%T.Error() should be %v", c.err, c.str)
-			}
+			assert.ErrorAs(t, testCase.err, &ne)
+			assert.Equal(t, testCase.timeout, ne.Timeout())
+			assert.Equal(t, testCase.temporary, ne.Temporary()) //nolint:staticcheck
+			assert.Equal(t, testCase.str, ne.Error())
 		})
 	}
 }

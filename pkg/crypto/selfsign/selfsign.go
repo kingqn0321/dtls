@@ -21,7 +21,7 @@ import (
 
 var errInvalidPrivateKey = errors.New("selfsign: invalid private key type")
 
-// GenerateSelfSigned creates a self-signed certificate
+// GenerateSelfSigned creates a self-signed certificate.
 func GenerateSelfSigned() (tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -31,7 +31,7 @@ func GenerateSelfSigned() (tls.Certificate, error) {
 	return SelfSign(priv)
 }
 
-// GenerateSelfSignedWithDNS creates a self-signed certificate
+// GenerateSelfSignedWithDNS creates a self-signed certificate.
 func GenerateSelfSignedWithDNS(cn string, sans ...string) (tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -41,25 +41,30 @@ func GenerateSelfSignedWithDNS(cn string, sans ...string) (tls.Certificate, erro
 	return WithDNS(priv, cn, sans...)
 }
 
-// SelfSign creates a self-signed certificate from a elliptic curve key
+// SelfSign creates a self-signed certificate from a elliptic curve key.
 func SelfSign(key crypto.PrivateKey) (tls.Certificate, error) {
 	return WithDNS(key, "self-signed cert")
 }
 
-// WithDNS creates a self-signed certificate from a elliptic curve key
+// WithDNS creates a self-signed certificate from a elliptic curve key.
 func WithDNS(key crypto.PrivateKey, cn string, sans ...string) (tls.Certificate, error) {
 	var (
 		pubKey    crypto.PublicKey
 		maxBigInt = new(big.Int) // Max random value, a 130-bits integer, i.e 2^130 - 1
 	)
 
-	switch k := key.(type) {
-	case ed25519.PrivateKey:
-		pubKey = k.Public()
-	case *ecdsa.PrivateKey:
-		pubKey = k.Public()
-	case *rsa.PrivateKey:
-		pubKey = k.Public()
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return tls.Certificate{}, errInvalidPrivateKey
+	}
+
+	switch k := signer.Public().(type) {
+	case ed25519.PublicKey:
+		pubKey = k
+	case *ecdsa.PublicKey:
+		pubKey = k
+	case *rsa.PublicKey:
+		pubKey = k
 	default:
 		return tls.Certificate{}, errInvalidPrivateKey
 	}
@@ -76,7 +81,7 @@ func WithDNS(key crypto.PrivateKey, cn string, sans ...string) (tls.Certificate,
 	names = append(names, sans...)
 
 	keyUsage := x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign
-	if _, isRSA := key.(*rsa.PrivateKey); isRSA {
+	if _, isRSA := signer.Public().(*rsa.PublicKey); isRSA {
 		keyUsage |= x509.KeyUsageKeyEncipherment
 	}
 
@@ -98,7 +103,7 @@ func WithDNS(key crypto.PrivateKey, cn string, sans ...string) (tls.Certificate,
 		},
 	}
 
-	raw, err := x509.CreateCertificate(rand.Reader, &template, &template, pubKey, key)
+	raw, err := x509.CreateCertificate(rand.Reader, &template, &template, pubKey, signer)
 	if err != nil {
 		return tls.Certificate{}, err
 	}
@@ -110,7 +115,7 @@ func WithDNS(key crypto.PrivateKey, cn string, sans ...string) (tls.Certificate,
 
 	return tls.Certificate{
 		Certificate: [][]byte{raw},
-		PrivateKey:  key,
+		PrivateKey:  signer,
 		Leaf:        leaf,
 	}, nil
 }

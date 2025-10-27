@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pion/dtls/v2/pkg/crypto/elliptic"
-	"github.com/pion/dtls/v2/pkg/crypto/signaturehash"
-	"github.com/pion/dtls/v2/pkg/protocol/alert"
-	"github.com/pion/dtls/v2/pkg/protocol/handshake"
+	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v3/pkg/crypto/signaturehash"
+	"github.com/pion/dtls/v3/pkg/protocol/alert"
+	"github.com/pion/dtls/v3/pkg/protocol/handshake"
 	"github.com/pion/logging"
 )
 
@@ -82,37 +82,42 @@ func (s handshakeState) String() string {
 }
 
 type handshakeFSM struct {
-	currentFlight flightVal
-	flights       []*packet
-	retransmit    bool
-	state         *State
-	cache         *handshakeCache
-	cfg           *handshakeConfig
-	closed        chan struct{}
+	currentFlight      flightVal
+	flights            []*packet
+	retransmit         bool
+	retransmitInterval time.Duration
+	state              *State
+	cache              *handshakeCache
+	cfg                *handshakeConfig
+	closed             chan struct{}
 }
 
 type handshakeConfig struct {
-	localPSKCallback            PSKCallback
-	localPSKIdentityHint        []byte
-	localCipherSuites           []CipherSuite             // Available CipherSuites
-	localSignatureSchemes       []signaturehash.Algorithm // Available signature schemes
-	extendedMasterSecret        ExtendedMasterSecretType  // Policy for the Extended Master Support extension
-	localSRTPProtectionProfiles []SRTPProtectionProfile   // Available SRTPProtectionProfiles, if empty no SRTP support
-	serverName                  string
-	supportedProtocols          []string
-	clientAuth                  ClientAuthType // If we are a client should we request a client certificate
-	localCertificates           []tls.Certificate
-	nameToCertificate           map[string]*tls.Certificate
-	insecureSkipVerify          bool
-	verifyPeerCertificate       func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
-	verifyConnection            func(*State) error
-	sessionStore                SessionStore
-	rootCAs                     *x509.CertPool
-	clientCAs                   *x509.CertPool
-	retransmitInterval          time.Duration
-	customCipherSuites          func() []CipherSuite
-	ellipticCurves              []elliptic.Curve
-	insecureSkipHelloVerify     bool
+	localPSKCallback             PSKCallback
+	localPSKIdentityHint         []byte
+	localCipherSuites            []CipherSuite             // Available CipherSuites
+	localSignatureSchemes        []signaturehash.Algorithm // Available signature schemes
+	extendedMasterSecret         ExtendedMasterSecretType  // Policy for the Extended Master Support extension
+	localSRTPProtectionProfiles  []SRTPProtectionProfile   // Available SRTPProtectionProfiles, if empty no SRTP support
+	localSRTPMasterKeyIdentifier []byte
+	serverName                   string
+	supportedProtocols           []string
+	clientAuth                   ClientAuthType // If we are a client should we request a client certificate
+	localCertificates            []tls.Certificate
+	nameToCertificate            map[string]*tls.Certificate
+	insecureSkipVerify           bool
+	verifyPeerCertificate        func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
+	verifyConnection             func(*State) error
+	sessionStore                 SessionStore
+	rootCAs                      *x509.CertPool
+	clientCAs                    *x509.CertPool
+	initialRetransmitInterval    time.Duration
+	disableRetransmitBackoff     bool
+	customCipherSuites           func() []CipherSuite
+	ellipticCurves               []elliptic.Curve
+	insecureSkipHelloVerify      bool
+	connectionIDGenerator        func() []byte
+	helloRandomBytesGenerator    func() [handshake.RandomBytesLength]byte
 
 	onFlightState func(flightVal, handshakeState)
 	log           logging.LeveledLogger
@@ -124,12 +129,18 @@ type handshakeConfig struct {
 	initialEpoch uint16
 
 	mu sync.Mutex
+
+	clientHelloMessageHook        func(handshake.MessageClientHello) handshake.Message
+	serverHelloMessageHook        func(handshake.MessageServerHello) handshake.Message
+	certificateRequestMessageHook func(handshake.MessageCertificateRequest) handshake.Message
+
+	resumeState *State
 }
 
 type flightConn interface {
 	notify(ctx context.Context, level alert.Level, desc alert.Description) error
 	writePackets(context.Context, []*packet) error
-	recvHandshake() <-chan chan struct{}
+	recvHandshake() <-chan recvHandshakeState
 	setLocalEpoch(epoch uint16)
 	handleQueuedPackets(context.Context) error
 	sessionKey() []byte
@@ -141,7 +152,7 @@ func (c *handshakeConfig) writeKeyLog(label string, clientRandom, secret []byte)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, err := c.keyLogWriter.Write([]byte(fmt.Sprintf("%s %x %x\n", label, clientRandom, secret)))
+	_, err := fmt.Fprintf(c.keyLogWriter, "%s %x %x\n", label, clientRandom, secret)
 	if err != nil {
 		c.log.Debugf("failed to write key log file: %s", err)
 	}
@@ -151,6 +162,7 @@ func srvCliStr(isClient bool) string {
 	if isClient {
 		return "client"
 	}
+
 	return "server"
 }
 
@@ -159,15 +171,16 @@ func newHandshakeFSM(
 	initialFlight flightVal,
 ) *handshakeFSM {
 	return &handshakeFSM{
-		currentFlight: initialFlight,
-		state:         s,
-		cache:         cache,
-		cfg:           cfg,
-		closed:        make(chan struct{}),
+		currentFlight:      initialFlight,
+		state:              s,
+		cache:              cache,
+		cfg:                cfg,
+		retransmitInterval: cfg.initialRetransmitInterval,
+		closed:             make(chan struct{}),
 	}
 }
 
-func (s *handshakeFSM) Run(ctx context.Context, c flightConn, initialState handshakeState) error {
+func (s *handshakeFSM) Run(ctx context.Context, conn flightConn, initialState handshakeState) error {
 	state := initialState
 	defer func() {
 		close(s.closed)
@@ -180,13 +193,13 @@ func (s *handshakeFSM) Run(ctx context.Context, c flightConn, initialState hands
 		var err error
 		switch state {
 		case handshakePreparing:
-			state, err = s.prepare(ctx, c)
+			state, err = s.prepare(ctx, conn)
 		case handshakeSending:
-			state, err = s.send(ctx, c)
+			state, err = s.send(ctx, conn)
 		case handshakeWaiting:
-			state, err = s.wait(ctx, c)
+			state, err = s.wait(ctx, conn)
 		case handshakeFinished:
-			state, err = s.finish(ctx, c)
+			state, err = s.finish(ctx, conn)
 		default:
 			return errInvalidFSMTransition
 		}
@@ -200,24 +213,24 @@ func (s *handshakeFSM) Done() <-chan struct{} {
 	return s.closed
 }
 
-func (s *handshakeFSM) prepare(ctx context.Context, c flightConn) (handshakeState, error) {
+func (s *handshakeFSM) prepare(ctx context.Context, conn flightConn) (handshakeState, error) {
 	s.flights = nil
 	// Prepare flights
 	var (
-		a    *alert.Alert
-		err  error
-		pkts []*packet
+		dtlsAlert *alert.Alert
+		err       error
+		pkts      []*packet
 	)
 	gen, retransmit, errFlight := s.currentFlight.getFlightGenerator()
 	if errFlight != nil {
 		err = errFlight
-		a = &alert.Alert{Level: alert.Fatal, Description: alert.InternalError}
+		dtlsAlert = &alert.Alert{Level: alert.Fatal, Description: alert.InternalError}
 	} else {
-		pkts, a, err = gen(c, s.state, s.cache, s.cfg)
+		pkts, dtlsAlert, err = gen(conn, s.state, s.cache, s.cfg)
 		s.retransmit = retransmit
 	}
-	if a != nil {
-		if alertErr := c.notify(ctx, a.Level, a.Description); alertErr != nil {
+	if dtlsAlert != nil {
+		if alertErr := conn.notify(ctx, dtlsAlert.Level, dtlsAlert.Description); alertErr != nil {
 			if err != nil {
 				err = alertErr
 			}
@@ -236,14 +249,15 @@ func (s *handshakeFSM) prepare(ctx context.Context, c flightConn) (handshakeStat
 			nextEpoch = p.record.Header.Epoch
 		}
 		if h, ok := p.record.Content.(*handshake.Handshake); ok {
-			h.Header.MessageSequence = uint16(s.state.handshakeSendSequence)
+			h.Header.MessageSequence = uint16(s.state.handshakeSendSequence) //nolint:gosec // G115
 			s.state.handshakeSendSequence++
 		}
 	}
 	if epoch != nextEpoch {
 		s.cfg.log.Tracef("[handshake:%s] -> changeCipherSpec (epoch: %d)", srvCliStr(s.state.isClient), nextEpoch)
-		c.setLocalEpoch(nextEpoch)
+		conn.setLocalEpoch(nextEpoch)
 	}
+
 	return handshakeSending, nil
 }
 
@@ -256,28 +270,35 @@ func (s *handshakeFSM) send(ctx context.Context, c flightConn) (handshakeState, 
 	if s.currentFlight.isLastSendFlight() {
 		return handshakeFinished, nil
 	}
+
 	return handshakeWaiting, nil
 }
 
-func (s *handshakeFSM) wait(ctx context.Context, c flightConn) (handshakeState, error) { //nolint:gocognit
+func (s *handshakeFSM) wait(ctx context.Context, conn flightConn) (handshakeState, error) { //nolint:gocognit,cyclop
 	parse, errFlight := s.currentFlight.getFlightParser()
 	if errFlight != nil {
-		if alertErr := c.notify(ctx, alert.Fatal, alert.InternalError); alertErr != nil {
-			if errFlight != nil {
-				return handshakeErrored, alertErr
-			}
+		if alertErr := conn.notify(ctx, alert.Fatal, alert.InternalError); alertErr != nil {
+			return handshakeErrored, alertErr
 		}
+
 		return handshakeErrored, errFlight
 	}
 
-	retransmitTimer := time.NewTimer(s.cfg.retransmitInterval)
+	retransmitTimer := time.NewTimer(s.retransmitInterval)
 	for {
 		select {
-		case done := <-c.recvHandshake():
-			nextFlight, alert, err := parse(ctx, c, s.state, s.cache, s.cfg)
-			close(done)
+		case state := <-conn.recvHandshake():
+			if state.isRetransmit {
+				close(state.done)
+
+				return handshakeSending, nil
+			}
+
+			nextFlight, alert, err := parse(ctx, conn, s.state, s.cache, s.cfg)
+			s.retransmitInterval = s.cfg.initialRetransmitInterval
+			close(state.done)
 			if alert != nil {
-				if alertErr := c.notify(ctx, alert.Level, alert.Description); alertErr != nil {
+				if alertErr := conn.notify(ctx, alert.Level, alert.Description); alertErr != nil {
 					if err != nil {
 						err = alertErr
 					}
@@ -289,62 +310,53 @@ func (s *handshakeFSM) wait(ctx context.Context, c flightConn) (handshakeState, 
 			if nextFlight == 0 {
 				break
 			}
-			s.cfg.log.Tracef("[handshake:%s] %s -> %s", srvCliStr(s.state.isClient), s.currentFlight.String(), nextFlight.String())
+			s.cfg.log.Tracef(
+				"[handshake:%s] %s -> %s",
+				srvCliStr(s.state.isClient),
+				s.currentFlight.String(),
+				nextFlight.String(),
+			)
 			if nextFlight.isLastRecvFlight() && s.currentFlight == nextFlight {
 				return handshakeFinished, nil
 			}
 			s.currentFlight = nextFlight
+
 			return handshakePreparing, nil
 
 		case <-retransmitTimer.C:
 			if !s.retransmit {
 				return handshakeWaiting, nil
 			}
+
+			// RFC 4347 4.2.4.1:
+			// Implementations SHOULD use an initial timer value of 1 second (the minimum defined in RFC 2988 [RFC2988])
+			// and double the value at each retransmission, up to no less than the RFC 2988 maximum of 60 seconds.
+			if !s.cfg.disableRetransmitBackoff {
+				s.retransmitInterval *= 2
+			}
+			if s.retransmitInterval > time.Second*60 {
+				s.retransmitInterval = time.Second * 60
+			}
+
 			return handshakeSending, nil
 		case <-ctx.Done():
+			s.retransmitInterval = s.cfg.initialRetransmitInterval
+
 			return handshakeErrored, ctx.Err()
 		}
 	}
 }
 
 func (s *handshakeFSM) finish(ctx context.Context, c flightConn) (handshakeState, error) {
-	parse, errFlight := s.currentFlight.getFlightParser()
-	if errFlight != nil {
-		if alertErr := c.notify(ctx, alert.Fatal, alert.InternalError); alertErr != nil {
-			if errFlight != nil {
-				return handshakeErrored, alertErr
-			}
-		}
-		return handshakeErrored, errFlight
-	}
-
-	retransmitTimer := time.NewTimer(s.cfg.retransmitInterval)
 	select {
-	case done := <-c.recvHandshake():
-		nextFlight, alert, err := parse(ctx, c, s.state, s.cache, s.cfg)
-		close(done)
-		if alert != nil {
-			if alertErr := c.notify(ctx, alert.Level, alert.Description); alertErr != nil {
-				if err != nil {
-					err = alertErr
-				}
-			}
-		}
-		if err != nil {
-			return handshakeErrored, err
-		}
-		if nextFlight == 0 {
-			break
-		}
-		if nextFlight.isLastRecvFlight() && s.currentFlight == nextFlight {
+	case state := <-c.recvHandshake():
+		close(state.done)
+		if s.state.isClient {
 			return handshakeFinished, nil
+		} else {
+			return handshakeSending, nil
 		}
-		<-retransmitTimer.C
-		// Retransmit last flight
-		return handshakeSending, nil
-
 	case <-ctx.Done():
 		return handshakeErrored, ctx.Err()
 	}
-	return handshakeFinished, nil
 }
